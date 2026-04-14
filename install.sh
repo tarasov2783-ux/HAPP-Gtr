@@ -48,31 +48,80 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
 
+# Install additional dependencies for 3x-ui integration
+log "Installing additional dependencies..."
+pip install requests uvicorn gunicorn 2>/dev/null || true
+
 log "Environment ready!"
 
-# Production server check
-if [ -f "gunicorn" ]; then
-    log "Production mode with gunicorn"
-    CMD="gunicorn server:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:3000 --daemon --pid gunicorn.pid"
-else
-    CMD="uvicorn server:app --host 0.0.0.0 --port 3000 --reload"
+# Create default servers_config.json if not exists
+if [ ! -f "servers_config.json" ]; then
+    log "Creating default servers_config.json..."
+    cat > servers_config.json << 'EOF'
+{
+  "servers": [
+    {
+      "id": "server1",
+      "name": "Основной сервер",
+      "address": "https://your-domain.com:54321",
+      "username": "admin",
+      "password": "your-password",
+      "inbounds": [
+        {
+          "id": 1,
+          "name": "VLESS-TCP-XTLS",
+          "protocol": "vless",
+          "port": 443,
+          "default": true
+        },
+        {
+          "id": 2,
+          "name": "VMESS-WS-TLS",
+          "protocol": "vmess",
+          "port": 8443,
+          "default": false
+        }
+      ],
+      "defaultTrafficGB": 100,
+      "defaultExpiryDays": 30
+    }
+  ]
+}
+EOF
+    warn "Please edit servers_config.json with your actual server settings!"
 fi
+
+# Create public directory if not exists
+if [ ! -d "public" ]; then
+    log "Creating public directory..."
+    mkdir -p public
+fi
+
+# Determine Python path for service
+PYTHON_PATH="$DIR/.venv/bin/python"
+UVICORN_PATH="$DIR/.venv/bin/uvicorn"
 
 # Create systemd service
 SERVICE_FILE="/etc/systemd/system/happ-generator.service"
 if command -v systemctl >/dev/null 2>&1; then
     log "Creating systemd service..."
+    
+    # Stop existing service if running
+    sudo systemctl stop happ-generator 2>/dev/null || true
+    
     sudo bash -c "cat > $SERVICE_FILE" << EOF
 [Unit]
-Description=HAPP Generator
+Description=HAPP Generator with 3x-UI Integration
 After=network.target
 
 [Service]
 Type=simple
 User=$(whoami)
 WorkingDirectory=$DIR
-Environment=PATH=$DIR/.venv/bin
-ExecStart=$DIR/.venv/bin/$CMD
+Environment="PATH=$DIR/.venv/bin"
+Environment="ADMIN_USER=admin"
+Environment="ADMIN_PASS=changeme123"
+ExecStart=$UVICORN_PATH server:app --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=3
 
@@ -89,12 +138,38 @@ EOF
     log "Logs: sudo journalctl -u happ-generator -f"
 else
     warn "No systemd, starting manually..."
-    exec $CMD
+    $UVICORN_PATH server:app --host 0.0.0.0 --port 3000 &
 fi
 
+# Check if service is running
+sleep 3
+if command -v systemctl >/dev/null 2>&1; then
+    if sudo systemctl is-active --quiet happ-generator; then
+        log "✅ Service is running!"
+    else
+        warn "⚠️ Service may have issues. Check with: sudo systemctl status happ-generator"
+    fi
+fi
+
+log ""
 log "✅ Installation complete!"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "🌐 Open: http://localhost:3000"
-log "👨‍💻 Admin: http://localhost:3000/admin.html (admin/changeme123)"
-log "🔧 Stop: sudo systemctl stop happ-generator"
-log "🔄 Restart: sudo systemctl restart happ-generator"
-log "📊 Status: sudo systemctl status happ-generator"
+log "👨‍💻 Admin panel: http://localhost:3000/happ/admin.html"
+log "🔐 Admin credentials: admin / changeme123"
+log ""
+log "📁 Configuration files:"
+log "   - servers_config.json - edit this to add your 3x-UI servers"
+log "   - db.json - database of created links"
+log ""
+log "🔧 Useful commands:"
+log "   sudo systemctl status happ-generator  - check service status"
+log "   sudo systemctl restart happ-generator - restart service"
+log "   sudo systemctl stop happ-generator     - stop service"
+log "   sudo journalctl -u happ-generator -f   - view logs"
+log ""
+log "⚠️  IMPORTANT:"
+log "   1. Edit servers_config.json with your 3x-UI server details"
+log "   2. Change default admin password in .env or service file"
+log "   3. Make sure your 3x-UI panel is accessible from this server"
+log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
