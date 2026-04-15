@@ -1,13 +1,12 @@
 {
   "servers": [
     {
-      "id": "ser",
-      "name": "Основной сервер",
-      "address": "https://your-domain.com:54321",
-      "username": "admin",
-      "password": "your-password",
-      "inbounds": [1, 3, 5],
-      "defaultInbound": 1,
+      "id": "server1",
+      "name": "Пример сервера 1",
+      "address": "https://your-domain.com:54321/path",
+      "sub_url": "https://your-domain.com:2096/sublink",
+      "username": "your_username",
+      "password": "your_password",
       "defaultTrafficGB": 100,
       "defaultExpiryDays": 30
     }

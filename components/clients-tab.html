@@ -1,0 +1,46 @@
+<div id="clientsTab" class="tab-content">
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>👥 Все клиенты</h2>
+        <div class="hint">Список всех клиентов на всех серверах</div>
+      </div>
+      <button id="refreshClientsBtn" class="btn-primary">🔄 Обновить</button>
+    </div>
+    <div class="panel-body">
+      <div class="search-bar">
+        <input type="text" class="search-input" id="clientSearchInput" placeholder="Поиск по email..." />
+        <select id="serverFilterSelect" class="filter-select">
+          <option value="all">Все серверы</option>
+        </select>
+        <div class="search-stats" id="clientStats">Клиентов: 0</div>
+      </div>
+      <div class="stats-row">
+        <div class="stat-card"><div class="label">Всего клиентов</div><div class="value" id="totalClients">0</div></div>
+        <div class="stat-card"><div class="label">Активных</div><div class="value" id="activeClients">0</div></div>
+        <div class="stat-card"><div class="label">Отключенных</div><div class="value" id="disabledClients">0</div></div>
+        <div class="stat-card"><div class="label">Использовано трафика</div><div class="value" id="totalTraffic">0 GB</div></div>
+      </div>
+      <div style="overflow-x: auto;">
+        <table class="clients-table">
+          <thead>
+            <tr>
+              <th>Сервер</th>
+              <th>Inbound</th>
+              <th>Email</th>
+              <th>Трафик</th>
+              <th>Прогресс</th>
+              <th>Статус</th>
+              <th>Срок</th>
+              <th>Комментарий</th>
+              <th>Действия</th>
+            </tr>
+          </thead>
+          <tbody id="clientsTableBody">
+            <tr><td colspan="9" class="empty">Загрузка...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>

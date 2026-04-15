@@ -1,6 +1,34 @@
-.venv/
+# Python
 __pycache__/
 *.pyc
+.venv/
 .env
-db.json
 *.log
+
+# Database
+db.json
+admin_users.json
+stats_monthly.json
+
+# Config with secrets
+servers_config.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup
+*.bak
+*.old
+*-backup/
+happ-generator-backup/
+
+# Node (если осталось)
+node_modules/
+package-lock.json
+package.json

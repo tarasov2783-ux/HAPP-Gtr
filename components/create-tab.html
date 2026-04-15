@@ -1,0 +1,128 @@
+<div id="createTab" class="tab-content">
+  <div class="panel">
+    <div class="panel-head">
+      <div>
+        <h2>✨ Создать нового клиента</h2>
+        <div class="hint">Создайте клиента на сервере 3x-UI и получите готовую HAPP ссылку</div>
+      </div>
+    </div>
+    <div class="panel-body">
+      <form id="createClientForm">
+        <div class="form-group">
+          <label>🌐 Сервер</label>
+          <select id="createServerId" required>
+            <option value="">Выберите сервер</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label>📡 Inbound</label>
+          <select id="createInboundId" required>
+            <option value="">Сначала выберите сервер</option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label>👤 Имя пользователя (можно любое)</label>
+          <input type="text" id="createUsername" required placeholder="user123 или user@example.com">
+          <div class="hint" style="margin-top: 5px;">Можно ввести любое имя, email не обязателен</div>
+        </div>
+        
+        <div class="form-row">
+          <div class="form-group">
+            <label>📊 Трафик в месяц (GB)</label>
+            <input type="number" id="createTrafficGB" value="100" min="1" max="10000">
+          </div>
+          
+          <div class="form-group">
+            <label>📅 Срок действия (дней)</label>
+            <input type="number" id="createExpiryDays" value="30" min="0" max="365">
+            <div class="hint" style="font-size: 11px;">0 = бессрочный</div>
+          </div>
+        </div>
+        
+        <div class="form-group">
+          <label>🔐 Лимит активаций HAPP</label>
+          <input type="number" id="createMaxActivations" value="1" min="1" max="100">
+          <div class="hint" style="margin-top: 5px;">Сколько устройств смогут активировать эту подписку</div>
+        </div>
+        
+        <button type="submit" class="btn-primary" style="width: 100%; padding: 14px;">🚀 Создать клиента и HAPP ссылку</button>
+      </form>
+      
+      <div id="createResult" style="margin-top: 24px; display: none;">
+        <div class="panel" style="background: var(--ok-bg); border-color: rgba(31,157,85,.3);">
+          <div class="panel-head">
+            <h3 style="color: #bbf7d0;">✅ Клиент успешно создан!</h3>
+          </div>
+          <div class="panel-body">
+            <div class="form-group">
+              <label>🔗 HAPP ссылка:</label>
+              <div class="code-block" id="resultHappLink"></div>
+            </div>
+            <div class="form-group">
+              <label>🔗 Subscription URL:</label>
+              <div class="code-block" id="resultSubUrl" style="font-size: 12px;"></div>
+            </div>
+            <div class="actions">
+              <button id="copyResultLink" class="btn-primary">📋 Копировать HAPP ссылку</button>
+              <button id="showQrBtn" class="btn-primary">📱 QR-код</button>
+              <a id="openResultLink" class="btn-primary" href="#" target="_blank">🔗 Открыть страницу активации</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Модальное окно QR -->
+<div id="qrModal" class="modal">
+  <div class="modal-content">
+    <h3>📱 QR-код для активации</h3>
+    <img id="qrImage" alt="QR Code">
+    <div class="qr-link" id="qrLinkText"></div>
+    <button class="btn btn-secondary" onclick="closeQRModal()">Закрыть</button>
+  </div>
+</div>
+
+<!-- Модальное окно добавления/редактирования сервера -->
+<div id="serverModal" class="modal">
+  <div class="modal-content">
+    <h3 id="serverModalTitle">➕ Добавить сервер</h3>
+    <form id="serverForm">
+      <div class="form-group">
+        <label>Название</label>
+        <input type="text" id="serverName" required placeholder="Мой сервер">
+      </div>
+      <div class="form-group">
+        <label>Адрес панели</label>
+        <input type="text" id="serverAddress" required placeholder="https://domain.com:54321/path">
+        <div class="hint" style="font-size: 11px;">Полный URL до панели 3x-UI (с портом и путем)</div>
+      </div>
+      <div class="form-group">
+        <label>Логин</label>
+        <input type="text" id="serverUsername" required>
+      </div>
+      <div class="form-group">
+        <label>Пароль</label>
+        <input type="password" id="serverPassword" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Трафик по умолч. (GB)</label>
+          <input type="number" id="serverTraffic" value="100">
+        </div>
+        <div class="form-group">
+          <label>Срок по умолч. (дней)</label>
+          <input type="number" id="serverExpiry" value="30">
+        </div>
+      </div>
+      <input type="hidden" id="serverId">
+      <div class="actions" style="margin-top: 16px;">
+        <button type="submit" class="btn-primary">💾 Сохранить</button>
+        <button type="button" class="btn-secondary" onclick="closeServerModal()">Отмена</button>
+      </div>
+    </form>
+  </div>
+</div>

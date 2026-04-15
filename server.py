@@ -4,6 +4,8 @@ import json
 import os
 import secrets
 import threading
+import asyncio
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,16 +18,10 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from user_agents import parse as parse_ua
-
+from datetime import datetime, timedelta
 from happ_crypto import create_happ_crypto_link
 
-# Импортируем менеджер для 3x-UI
-try:
-    from xui_manager import XUIManager
-    XUI_AVAILABLE = True
-except ImportError:
-    XUI_AVAILABLE = False
-    print("Warning: xui_manager not available")
+from xui_manager import XUIManager
 
 BASE_DIR = Path(__file__).resolve().parent
 PUBLIC_DIR = BASE_DIR / "public"
@@ -47,13 +43,12 @@ group_locks: Dict[str, threading.Lock] = {}
 request_cache: Dict[str, float] = {}
 global_lock = threading.Lock()
 
-# Инициализируем менеджер 3x-UI
-xui_manager = None
-if XUI_AVAILABLE:
-    try:
-        xui_manager = XUIManager("servers_config.json")
-    except Exception as e:
-        print(f"Warning: Could not load xui_manager: {e}")
+try:
+    xui_manager = XUIManager("servers_config.json")
+    print("[INFO] XUI Manager initialized successfully")
+except Exception as e:
+    print(f"[WARNING] Could not load xui_manager: {e}")
+    xui_manager = None
 
 
 class GenerateRequest(BaseModel):
@@ -64,10 +59,22 @@ class GenerateRequest(BaseModel):
 class CreateClientRequest(BaseModel):
     serverId: str
     inboundId: int
-    email: str
+    email: str = ""
+    username: str = ""
     trafficGB: int = 100
     expiryDays: int = 30
     maxActivations: int = 1
+
+
+class ServerRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    address: str
+    sub_url: str = ""
+    username: str
+    password: str
+    defaultTrafficGB: int = 100
+    defaultExpiryDays: int = 30
 
 
 def now_iso() -> str:
@@ -89,6 +96,22 @@ def load_db() -> Dict[str, Any]:
 
 def save_db(data: Dict[str, Any]) -> None:
     DB_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+
+def load_servers_config() -> Dict:
+    config_path = BASE_DIR / "servers_config.json"
+    if not config_path.exists():
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump({"servers": []}, f, indent=2)
+        return {"servers": []}
+    with open(config_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_servers_config(config: Dict) -> None:
+    config_path = BASE_DIR / "servers_config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 def normalize_input(value: str = "") -> str:
@@ -354,6 +377,8 @@ def map_link_for_admin(item: Dict[str, Any]) -> Dict[str, Any]:
         "isViolator": len(violations) > 0 or item.get("status") == "violator",
         "activations": activations,
         "violations": violations,
+        "comment": item.get("comment", ""),
+        "clientInfo": item.get("clientInfo"),
     }
 
 
@@ -426,7 +451,27 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> None
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
 
 
-# ==================== ОСНОВНЫЕ МАРШРУТЫ (без префикса) ====================
+def make_qr_response(full_url: str) -> Response:
+    img = qrcode.make(full_url)
+    from io import BytesIO
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+def get_base_url(request: Request) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    forwarded_host = request.headers.get("x-forwarded-host")
+    
+    if forwarded_proto and forwarded_host:
+        return f"{forwarded_proto}://{forwarded_host}"
+    
+    scheme = request.url.scheme if request.url.scheme else "https"
+    host = request.headers.get("host", "localhost:3000")
+    return f"{scheme}://{host}"
+
+
+# ==================== ОСНОВНЫЕ МАРШРУТЫ ====================
 
 @app.get("/")
 async def root():
@@ -451,7 +496,7 @@ async def api_generate(payload: GenerateRequest):
     if max_activations < 1 or max_activations > 100:
         return JSONResponse({"ok": False, "error": "Лимит активаций должен быть от 1 до 100"}, status_code=400)
     try:
-        happ_link = create_happ_crypto_link(subscription_url, "v4", True)
+        happ_link = create_happ_crypto_link(subscription_url, "v5", True)
         if not happ_link.startswith("happ://crypt"):
             raise RuntimeError("Не удалось сгенерировать корректную happ-ссылку")
         token = make_id(16)
@@ -469,6 +514,7 @@ async def api_generate(payload: GenerateRequest):
                 "lastUsedAt": None,
                 "activations": [],
                 "violations": [],
+                "comment": "",
             }
         )
         save_db(db)
@@ -750,22 +796,25 @@ async def api_admin_reset(link_id: str, _: None = Depends(require_admin)):
     return {"ok": True}
 
 
-def make_qr_response(full_url: str) -> Response:
-    img = qrcode.make(full_url)
-    from io import BytesIO
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
-
-
 @app.get("/api/qrcode/{token}")
 async def api_qrcode(token: str, request: Request):
     db = load_db()
     item = next((x for x in db.get("links", []) if x.get("token") == token), None)
     if not item:
         return JSONResponse({"ok": False, "error": "Токен не найден"}, status_code=404)
-    base_url = f"{request.url.scheme}://{request.headers.get('host')}"
+    base_url = get_base_url(request)
     return make_qr_response(f"{base_url}/r/{token}")
+
+
+@app.get("/api/qrcode-page/{token}")
+async def api_qrcode_page(token: str, request: Request):
+    db = load_db()
+    item = next((x for x in db.get("links", []) if x.get("token") == token), None)
+    if not item:
+        return JSONResponse({"ok": False, "error": "Токен не найден"}, status_code=404)
+    base_url = get_base_url(request)
+    full_url = f"{base_url}/happ/r/{token}"
+    return make_qr_response(full_url)
 
 
 @app.get("/r/{token}")
@@ -782,59 +831,117 @@ async def route_redeem(token: str):
 
 # ==================== МАРШРУТЫ ДЛЯ 3x-UI ====================
 
+@app.on_event("startup")
+async def startup_event():
+    async def refresh_sessions():
+        while True:
+            await asyncio.sleep(3600)  # каждый час
+            if xui_manager:
+                for server_id in list(xui_manager.sessions.keys()):
+                    try:
+                        xui_manager._get_session(server_id)
+                        print(f"[INFO] Session refreshed for {server_id}")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to refresh session for {server_id}: {e}")
+    
+    asyncio.create_task(refresh_sessions())
+
 @app.get("/api/servers")
 async def api_get_servers(_: None = Depends(require_admin)):
-    """Получить список серверов и их inbound'ов"""
+    if not xui_manager:
+        return JSONResponse({"ok": True, "servers": []})
+    
     try:
-        config_path = BASE_DIR / "servers_config.json"
-        if not config_path.exists():
-            return JSONResponse({"ok": True, "servers": []})
-        
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-        
         servers = []
-        for server in config.get("servers", []):
+        for server_id, server in xui_manager.servers.items():
+            inbounds = xui_manager.list_inbounds(server_id)
             servers.append({
-                "id": server.get("id"),
+                "id": server_id,
                 "name": server.get("name"),
                 "address": server.get("address"),
-                "inbounds": server.get("inbounds", []),
+                "sub_url": server.get("sub_url", ""),
+                "inbounds": inbounds,
                 "defaultTrafficGB": server.get("defaultTrafficGB", 100),
                 "defaultExpiryDays": server.get("defaultExpiryDays", 30)
             })
-        
         return {"ok": True, "servers": servers}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@app.get("/api/all-clients")
+async def api_get_all_clients(_: None = Depends(require_admin)):
+    if not xui_manager:
+        return JSONResponse({"ok": True, "clients": [], "servers": []})
+    
+    try:
+        all_clients = []
+        servers_list = []
+        
+        db = load_db()
+        local_comments = {}
+        for link in db.get("links", []):
+            client_info = link.get("clientInfo")
+            if client_info and client_info.get("clientId"):
+                local_comments[client_info.get("clientId")] = link.get("comment", "")
+        
+        for server_id, server in xui_manager.servers.items():
+            servers_list.append({
+                "id": server_id,
+                "name": server.get("name")
+            })
+            
+            clients = xui_manager.get_all_clients(server_id)
+            for client in clients:
+                client["server_id"] = server_id
+                client["server_name"] = server.get("name")
+                
+                if client["client_id"] in local_comments and local_comments[client["client_id"]]:
+                    client["comment"] = local_comments[client["client_id"]]
+                
+                all_clients.append(client)
+        
+        return {"ok": True, "clients": all_clients, "servers": servers_list}
+    except Exception as e:
+        print(f"[DEBUG] Error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.post("/api/create-client")
-async def api_create_client(payload: CreateClientRequest, _: None = Depends(require_admin)):
-    """Создать клиента на сервере и сгенерировать ссылку для HAPP"""
-    if not XUI_AVAILABLE or not xui_manager:
+async def api_create_client(payload: CreateClientRequest, request: Request, _: None = Depends(require_admin)):
+    if not xui_manager:
         return JSONResponse({"ok": False, "error": "XUI Manager not available"}, status_code=500)
     
     try:
-        # Создаем клиента на сервере
+        user_identifier = payload.email or payload.username
+        if not user_identifier:
+            user_identifier = f"user_{make_id(8)}"
+        
         client = xui_manager.create_client(
             server_id=payload.serverId,
             inbound_id=payload.inboundId,
-            email=payload.email,
+            email=user_identifier,
             traffic_gb=payload.trafficGB,
             expiry_days=payload.expiryDays,
-            enable=True
+            enable=True,
+            comment=""
         )
         
-        # Получаем subscription URL
-        subscription_url = client.get("subscription_url", "")
+        subscription_url = client["subscription_url"]
         
-        # Генерируем HAPP ссылку
-        happ_link = create_happ_crypto_link(subscription_url, "v4", True)
+        print(f"[DEBUG] ========================================")
+        print(f"[DEBUG] Subscription URL to encrypt: {subscription_url}")
+        print(f"[DEBUG] ========================================")
         
-        # Сохраняем в базу данных
+        from happ_crypto import create_happ_crypto_link
+        happ_link = create_happ_crypto_link(subscription_url, "v5", True)
+        
+        print(f"[DEBUG] Generated HAPP link: {happ_link}")
+        print(f"[DEBUG] ========================================")
+        
         db = load_db()
-        username = payload.email.split('@')[0] if '@' in payload.email else payload.email
+        username = user_identifier.split('@')[0] if '@' in user_identifier else user_identifier
         token = make_id(16)
         
         db.setdefault("links", []).append({
@@ -850,11 +957,12 @@ async def api_create_client(payload: CreateClientRequest, _: None = Depends(requ
             "lastUsedAt": None,
             "activations": [],
             "violations": [],
+            "comment": "",
             "clientInfo": {
                 "serverId": payload.serverId,
                 "inboundId": payload.inboundId,
                 "clientId": client["client_id"],
-                "email": payload.email,
+                "email": client["email"],
                 "trafficGB": payload.trafficGB,
                 "expiryDate": client["expiry_date"]
             }
@@ -866,14 +974,235 @@ async def api_create_client(payload: CreateClientRequest, _: None = Depends(requ
             "client": client,
             "onceLink": f"/r/{token}",
             "happLink": happ_link,
-            "subscriptionUrl": subscription_url
+            "subscriptionUrl": subscription_url,
+            "token": token
         }
         
     except Exception as e:
+        print(f"[DEBUG] Create client error: {e}")
+        traceback.print_exc()
         return JSONResponse(
             {"ok": False, "error": str(e)},
             status_code=500
         )
+
+
+# ==================== УПРАВЛЕНИЕ СЕРВЕРАМИ (CRUD) ====================
+
+@app.get("/api/admin/servers")
+async def api_admin_get_servers(_: None = Depends(require_admin)):
+    config = load_servers_config()
+    return {"ok": True, "servers": config.get("servers", [])}
+
+
+@app.post("/api/admin/servers")
+async def api_admin_add_server(payload: ServerRequest, _: None = Depends(require_admin)):
+    config = load_servers_config()
+    servers = config.get("servers", [])
+    
+    server_id = payload.id or make_id(8)
+    
+    new_server = {
+        "id": server_id,
+        "name": payload.name,
+        "address": payload.address.rstrip('/'),
+        "sub_url": payload.sub_url.rstrip('/') if payload.sub_url else "",
+        "username": payload.username,
+        "password": payload.password,
+        "defaultTrafficGB": payload.defaultTrafficGB,
+        "defaultExpiryDays": payload.defaultExpiryDays
+    }
+    
+    servers.append(new_server)
+    config["servers"] = servers
+    save_servers_config(config)
+    
+    global xui_manager
+    try:
+        xui_manager = XUIManager("servers_config.json")
+    except Exception as e:
+        print(f"Error reloading xui_manager: {e}")
+    
+    return {"ok": True, "server": new_server}
+
+
+@app.put("/api/admin/servers/{server_id}")
+async def api_admin_update_server(server_id: str, payload: ServerRequest, _: None = Depends(require_admin)):
+    config = load_servers_config()
+    servers = config.get("servers", [])
+    
+    for i, s in enumerate(servers):
+        if s.get("id") == server_id:
+            servers[i] = {
+                "id": server_id,
+                "name": payload.name,
+                "address": payload.address.rstrip('/'),
+                "sub_url": payload.sub_url.rstrip('/') if payload.sub_url else "",
+                "username": payload.username,
+                "password": payload.password,
+                "defaultTrafficGB": payload.defaultTrafficGB,
+                "defaultExpiryDays": payload.defaultExpiryDays
+            }
+            break
+    else:
+        return JSONResponse({"ok": False, "error": "Server not found"}, status_code=404)
+    
+    config["servers"] = servers
+    save_servers_config(config)
+    
+    global xui_manager
+    try:
+        xui_manager = XUIManager("servers_config.json")
+    except Exception as e:
+        print(f"Error reloading xui_manager: {e}")
+    
+    return {"ok": True}
+
+
+@app.delete("/api/admin/servers/{server_id}")
+async def api_admin_delete_server(server_id: str, _: None = Depends(require_admin)):
+    config = load_servers_config()
+    servers = config.get("servers", [])
+    
+    new_servers = [s for s in servers if s.get("id") != server_id]
+    if len(new_servers) == len(servers):
+        return JSONResponse({"ok": False, "error": "Server not found"}, status_code=404)
+    
+    config["servers"] = new_servers
+    save_servers_config(config)
+    
+    global xui_manager
+    try:
+        xui_manager = XUIManager("servers_config.json")
+    except Exception as e:
+        print(f"Error reloading xui_manager: {e}")
+    
+    return {"ok": True}
+
+
+# ==================== УПРАВЛЕНИЕ КЛИЕНТАМИ ====================
+
+@app.post("/api/client/{server_id}/{inbound_id}/{client_id}/toggle")
+async def api_toggle_client(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    if not xui_manager:
+        return JSONResponse({"ok": False, "error": "XUI Manager not available"}, status_code=500)
+    
+    try:
+        body = await request.json()
+        enable = body.get("enable", True)
+        
+        print(f"[DEBUG] Toggle client: server={server_id}, inbound={inbound_id}, client={client_id}, enable={enable}")
+        
+        result = xui_manager.update_client_status(server_id, inbound_id, client_id, enable)
+        
+        if result:
+            return {"ok": True, "enable": enable}
+        else:
+            return JSONResponse({"ok": False, "error": "Failed to update client status"}, status_code=500)
+        
+    except Exception as e:
+        print(f"[DEBUG] Toggle error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/client/{server_id}/{inbound_id}/{client_id}/update")
+async def api_update_client(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    if not xui_manager:
+        return JSONResponse({"ok": False, "error": "XUI Manager not available"}, status_code=500)
+    
+    try:
+        body = await request.json()
+        traffic_gb = body.get("trafficGB")
+        expiry_days = body.get("expiryDays")
+        comment = body.get("comment")
+        email = body.get("email")
+        sub_url = body.get("subUrl")
+        
+        print(f"[DEBUG] Update client: traffic={traffic_gb}, expiry={expiry_days}, email={email}, sub_url={sub_url}, comment={comment}")
+        
+        result = xui_manager.update_client_settings(
+            server_id, inbound_id, client_id, 
+            traffic_gb=traffic_gb, 
+            expiry_days=expiry_days,
+            comment=comment,
+            email=email,
+            sub_url=sub_url
+        )
+        
+        if not result:
+            return JSONResponse({"ok": False, "error": "Failed to update client settings"}, status_code=500)
+        
+        if comment is not None:
+            db = load_db()
+            for link in db.get("links", []):
+                client_info = link.get("clientInfo")
+                if client_info and client_info.get("clientId") == client_id:
+                    link["comment"] = comment
+                    save_db(db)
+                    print(f"[DEBUG] Updated comment in db.json: {comment}")
+                    break
+        
+        return {"ok": True}
+        
+    except Exception as e:
+        print(f"[DEBUG] Update error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/client/{server_id}/{inbound_id}/{client_id}/comment")
+async def api_update_client_comment(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    if not xui_manager:
+        return JSONResponse({"ok": False, "error": "XUI Manager not available"}, status_code=500)
+    
+    try:
+        body = await request.json()
+        comment = body.get("comment", "")
+        
+        result = xui_manager.update_client_comment(server_id, inbound_id, client_id, comment)
+        
+        if not result:
+            return JSONResponse({"ok": False, "error": "Failed to update comment in panel"}, status_code=500)
+        
+        db = load_db()
+        for link in db.get("links", []):
+            client_info = link.get("clientInfo")
+            if client_info and client_info.get("clientId") == client_id:
+                link["comment"] = comment
+                save_db(db)
+                break
+        
+        return {"ok": True, "comment": comment}
+        
+    except Exception as e:
+        print(f"[DEBUG] Comment update error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.delete("/api/client/{server_id}/{inbound_id}/{client_id}")
+async def api_delete_client(server_id: str, inbound_id: int, client_id: str, _: None = Depends(require_admin)):
+    if not xui_manager:
+        return JSONResponse({"ok": False, "error": "XUI Manager not available"}, status_code=500)
+    
+    try:
+        result = xui_manager.delete_client(server_id, inbound_id, client_id)
+        
+        if not result:
+            return JSONResponse({"ok": False, "error": "Failed to delete client from server"}, status_code=500)
+        
+        db = load_db()
+        db["links"] = [link for link in db.get("links", []) 
+                       if not (link.get("clientInfo") and link.get("clientInfo").get("clientId") == client_id)]
+        save_db(db)
+        
+        return {"ok": True}
+        
+    except Exception as e:
+        print(f"[DEBUG] Delete error: {e}")
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 # ==================== МАРШРУТЫ С ПРЕФИКСОМ /happ ====================
@@ -949,8 +1278,13 @@ async def happ_api_qrcode(token: str, request: Request):
     item = next((x for x in db.get("links", []) if x.get("token") == token), None)
     if not item:
         return JSONResponse({"ok": False, "error": "Токен не найден"}, status_code=404)
-    base_url = f"{request.url.scheme}://{request.headers.get('host')}"
+    base_url = get_base_url(request)
     return make_qr_response(f"{base_url}/happ/r/{token}")
+
+
+@app.get("/happ/api/qrcode-page/{token}")
+async def happ_api_qrcode_page(token: str, request: Request):
+    return await api_qrcode_page(token, request)
 
 
 @app.get("/happ/r/{token}")
@@ -958,15 +1292,59 @@ async def happ_route_redeem(token: str):
     return await route_redeem(token)
 
 
-# Маршруты для 3x-UI с префиксом /happ
 @app.get("/happ/api/servers")
 async def happ_api_get_servers(_: None = Depends(require_admin)):
     return await api_get_servers(_)
 
 
+@app.get("/happ/api/all-clients")
+async def happ_api_get_all_clients(_: None = Depends(require_admin)):
+    return await api_get_all_clients(_)
+
+
 @app.post("/happ/api/create-client")
-async def happ_api_create_client(payload: CreateClientRequest, _: None = Depends(require_admin)):
-    return await api_create_client(payload, _)
+async def happ_api_create_client(payload: CreateClientRequest, request: Request, _: None = Depends(require_admin)):
+    return await api_create_client(payload, request, _)
+
+
+@app.get("/happ/api/admin/servers")
+async def happ_api_admin_get_servers(_: None = Depends(require_admin)):
+    return await api_admin_get_servers(_)
+
+
+@app.post("/happ/api/admin/servers")
+async def happ_api_admin_add_server(payload: ServerRequest, _: None = Depends(require_admin)):
+    return await api_admin_add_server(payload, _)
+
+
+@app.put("/happ/api/admin/servers/{server_id}")
+async def happ_api_admin_update_server(server_id: str, payload: ServerRequest, _: None = Depends(require_admin)):
+    return await api_admin_update_server(server_id, payload, _)
+
+
+@app.delete("/happ/api/admin/servers/{server_id}")
+async def happ_api_admin_delete_server(server_id: str, _: None = Depends(require_admin)):
+    return await api_admin_delete_server(server_id, _)
+
+
+@app.post("/happ/api/client/{server_id}/{inbound_id}/{client_id}/toggle")
+async def happ_api_toggle_client(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    return await api_toggle_client(server_id, inbound_id, client_id, request, _)
+
+
+@app.post("/happ/api/client/{server_id}/{inbound_id}/{client_id}/update")
+async def happ_api_update_client(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    return await api_update_client(server_id, inbound_id, client_id, request, _)
+
+
+@app.post("/happ/api/client/{server_id}/{inbound_id}/{client_id}/comment")
+async def happ_api_update_client_comment(server_id: str, inbound_id: int, client_id: str, request: Request, _: None = Depends(require_admin)):
+    return await api_update_client_comment(server_id, inbound_id, client_id, request, _)
+
+
+@app.delete("/happ/api/client/{server_id}/{inbound_id}/{client_id}")
+async def happ_api_delete_client(server_id: str, inbound_id: int, client_id: str, _: None = Depends(require_admin)):
+    return await api_delete_client(server_id, inbound_id, client_id, _)
 
 
 @app.get("/happ/static/{path:path}")
@@ -977,10 +1355,7 @@ async def happ_static(path: str):
     return JSONResponse({"ok": False, "error": "File not found"}, status_code=404)
 
 
-# Статические файлы для корневого пути
 app.mount("/static", StaticFiles(directory=str(PUBLIC_DIR)), name="static")
-
-# Статические файлы для /happ/static
 app.mount("/happ/static", StaticFiles(directory=str(PUBLIC_DIR)), name="happ_static")
 
 
